@@ -1,0 +1,38 @@
+<!-- A throwaway file for super simple testing via a UI -->
+<html>
+<body>
+Role:<br>
+<input id="role" type="text" value="test"/><br>
+<button id="login">Login</button>
+
+<script>
+document.getElementById("login").addEventListener("click", doLogin);
+
+var host = "http://127.0.0.1:8200"
+function doLogin() {
+		role = document.getElementById("role").value;
+
+	fetch(`${host}/v1/auth/jwt/oidc/auth_url`, {
+		method: "POST",
+		body: JSON.stringify({
+			role: role,
+		})
+	}).then(function(response) {
+		return response.json();
+	}).then(function(myJSON) {
+		oidcAuth(myJSON.data.auth_url);
+	});
+}
+
+function oidcAuth(url) {
+	console.log(url)
+	url = url.replace("vaultserver", host);
+	console.log(url)
+	location.replace(url);
+}
+
+</script>
+
+</body>
+</html>
+

@@ -29,6 +29,18 @@ func pathConfig(b *jwtAuthBackend) *framework.Path {
 				Type:        framework.TypeString,
 				Description: "The CA certificate or chain of certificates, in PEM format, to use to validate conections to the OIDC Discovery URL. If not set, system certificates are used.",
 			},
+			"oidc_client_id": {
+				Type:        framework.TypeString,
+				Description: ``,
+			},
+			"oidc_client_secret": {
+				Type:        framework.TypeString,
+				Description: ``,
+			},
+			"default_role": {
+				Type:        framework.TypeString,
+				Description: ``,
+			},
 			"jwt_validation_pubkeys": {
 				Type:        framework.TypeCommaStringSlice,
 				Description: `A list of PEM-encoded public keys to use to authenticate signatures locally. Cannot be used with "oidc_discovery_url".`,
@@ -98,6 +110,9 @@ func (b *jwtAuthBackend) pathConfigRead(ctx context.Context, req *logical.Reques
 		Data: map[string]interface{}{
 			"oidc_discovery_url":     config.OIDCDiscoveryURL,
 			"oidc_discovery_ca_pem":  config.OIDCDiscoveryCAPEM,
+			"oidc_client_id":         config.OIDCClientID,
+			"oidc_client_secret":     config.OIDCClientSecret,
+			"default_role":           config.DefaultRole,
 			"jwt_validation_pubkeys": config.JWTValidationPubKeys,
 			"bound_issuer":           config.BoundIssuer,
 		},
@@ -110,6 +125,9 @@ func (b *jwtAuthBackend) pathConfigWrite(ctx context.Context, req *logical.Reque
 	config := &jwtConfig{
 		OIDCDiscoveryURL:     d.Get("oidc_discovery_url").(string),
 		OIDCDiscoveryCAPEM:   d.Get("oidc_discovery_ca_pem").(string),
+		OIDCClientID:         d.Get("oidc_client_id").(string),
+		OIDCClientSecret:     d.Get("oidc_client_secret").(string),
+		DefaultRole:          d.Get("default_role").(string),
 		JWTValidationPubKeys: d.Get("jwt_validation_pubkeys").([]string),
 		BoundIssuer:          d.Get("bound_issuer").(string),
 	}
@@ -120,11 +138,18 @@ func (b *jwtAuthBackend) pathConfigWrite(ctx context.Context, req *logical.Reque
 		config.OIDCDiscoveryURL != "" && len(config.JWTValidationPubKeys) != 0:
 		return logical.ErrorResponse("exactly one of 'oidc_discovery_url' and 'jwt_validation_pubkeys' must be set"), nil
 
+	case config.OIDCClientID != "" && config.OIDCClientSecret == "",
+		config.OIDCClientID == "" && config.OIDCClientSecret != "":
+		return logical.ErrorResponse("both 'oidc_client_id' and 'oidc_client_secret' must be set for OIDC"), nil
+
 	case config.OIDCDiscoveryURL != "":
 		_, err := b.createProvider(config)
 		if err != nil {
 			return logical.ErrorResponse(errwrap.Wrapf("error checking discovery URL: {{err}}", err).Error()), nil
 		}
+
+	case config.OIDCClientID != "" && config.OIDCDiscoveryURL == "":
+		return logical.ErrorResponse("'oidc_discovery_url' must be set for OIDC"), nil
 
 	case len(config.JWTValidationPubKeys) != 0:
 		for _, v := range config.JWTValidationPubKeys {
@@ -181,8 +206,11 @@ func (b *jwtAuthBackend) createProvider(config *jwtConfig) (*oidc.Provider, erro
 type jwtConfig struct {
 	OIDCDiscoveryURL     string   `json:"oidc_discovery_url"`
 	OIDCDiscoveryCAPEM   string   `json:"oidc_discovery_ca_pem"`
+	OIDCClientID         string   `json:"oidc_client_id"`
+	OIDCClientSecret     string   `json:"oidc_client_secret"`
 	JWTValidationPubKeys []string `json:"jwt_validation_pubkeys"`
 	BoundIssuer          string   `json:"bound_issuer"`
+	DefaultRole          string   `json:"default_role"`
 
 	ParsedJWTPubKeys []interface{} `json:"-"`
 }

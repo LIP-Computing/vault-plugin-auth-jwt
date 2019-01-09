@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hashicorp/errwrap"
 	sockaddr "github.com/hashicorp/go-sockaddr"
 	"github.com/hashicorp/vault/helper/parseutil"
 	"github.com/hashicorp/vault/helper/policyutil"
@@ -34,6 +33,10 @@ func pathRole(b *jwtAuthBackend) *framework.Path {
 			"name": {
 				Type:        framework.TypeLowerCaseString,
 				Description: "Name of the role.",
+			},
+			"role_type": {
+				Type:        framework.TypeString,
+				Description: "Type of the role, either 'jwt' or 'oidc'.",
 			},
 			"policies": {
 				Type:        framework.TypeCommaStringSlice,
@@ -68,6 +71,10 @@ TTL will be set to the value of this parameter.`,
 				Type:        framework.TypeCommaStringSlice,
 				Description: `Comma-separated list of 'aud' claims that are valid for login; any match is sufficient`,
 			},
+			"bound_claims": &framework.FieldSchema{
+				Type:        framework.TypeMap,
+				Description: `Map of claims/values which must match for login`,
+			},
 			"user_claim": {
 				Type:        framework.TypeString,
 				Description: `The claim to use for the Identity entity alias name`,
@@ -85,6 +92,10 @@ TTL will be set to the value of this parameter.`,
 				Description: `Comma-separated list of IP CIDRS that are allowed to 
 authenticate against this role`,
 			},
+			"oidc_scopes": {
+				Type:        framework.TypeCommaStringSlice,
+				Description: `Comma-separated list of OIDC scopes`,
+			},
 		},
 		ExistenceCheck: b.pathRoleExistenceCheck,
 		Callbacks: map[logical.Operation]framework.OperationFunc{
@@ -99,6 +110,8 @@ authenticate against this role`,
 }
 
 type jwtRole struct {
+	RoleType string `json:"role_type"`
+
 	// Policies that are to be required by the token to access this role
 	Policies []string `json:"policies"`
 
@@ -121,10 +134,12 @@ type jwtRole struct {
 	// Role binding properties
 	BoundAudiences              []string                      `json:"bound_audiences"`
 	BoundSubject                string                        `json:"bound_subject"`
+	BoundClaims                 map[string]interface{}        `json:"bound_claims"`
 	BoundCIDRs                  []*sockaddr.SockAddrMarshaler `json:"bound_cidrs"`
 	UserClaim                   string                        `json:"user_claim"`
 	GroupsClaim                 string                        `json:"groups_claim"`
 	GroupsClaimDelimiterPattern string                        `json:"groups_claim_delimiter_pattern"`
+	OIDCScopes                  []string                      `json:"oidc_scopes"`
 }
 
 // role takes a storage backend and the name and returns the role's storage
@@ -182,6 +197,7 @@ func (b *jwtAuthBackend) pathRoleRead(ctx context.Context, req *logical.Request,
 	// Create a map of data to be returned
 	resp := &logical.Response{
 		Data: map[string]interface{}{
+			"role_type":                      role.RoleType,
 			"policies":                       role.Policies,
 			"num_uses":                       role.NumUses,
 			"period":                         int64(role.Period.Seconds()),
@@ -190,6 +206,7 @@ func (b *jwtAuthBackend) pathRoleRead(ctx context.Context, req *logical.Request,
 			"bound_audiences":                role.BoundAudiences,
 			"bound_subject":                  role.BoundSubject,
 			"bound_cidrs":                    role.BoundCIDRs,
+			"bound_claims":                   role.BoundClaims,
 			"user_claim":                     role.UserClaim,
 			"groups_claim":                   role.GroupsClaim,
 			"groups_claim_delimiter_pattern": role.GroupsClaimDelimiterPattern,
@@ -235,6 +252,15 @@ func (b *jwtAuthBackend) pathRoleCreateUpdate(ctx context.Context, req *logical.
 		}
 		role = new(jwtRole)
 	}
+
+	roleType := data.Get("role_type").(string)
+	if roleType == "" {
+		roleType = "jwt"
+	}
+	if roleType != "jwt" && roleType != "oidc" {
+		return logical.ErrorResponse("invalid 'role_type': " + roleType), nil
+	}
+	role.RoleType = roleType
 
 	if policiesRaw, ok := data.GetOk("policies"); ok {
 		role.Policies = policyutil.ParsePolicies(policiesRaw)
@@ -287,6 +313,10 @@ func (b *jwtAuthBackend) pathRoleCreateUpdate(ctx context.Context, req *logical.
 		role.BoundCIDRs = parsedCIDRs
 	}
 
+	if boundClaimsRaw, ok := data.GetOk("bound_claims"); ok {
+		role.BoundClaims = boundClaimsRaw.(map[string]interface{})
+	}
+
 	if userClaim, ok := data.GetOk("user_claim"); ok {
 		role.UserClaim = userClaim.(string)
 	}
@@ -302,17 +332,18 @@ func (b *jwtAuthBackend) pathRoleCreateUpdate(ctx context.Context, req *logical.
 		role.GroupsClaimDelimiterPattern = groupsClaimDelimiterPattern.(string)
 	}
 
-	// Validate claim/delims
-	if role.GroupsClaim != "" {
-		if _, err := parseClaimWithDelimiters(role.GroupsClaim, role.GroupsClaimDelimiterPattern); err != nil {
-			return logical.ErrorResponse(errwrap.Wrapf("error validating delimiters for groups claim: {{err}}", err).Error()), nil
-		}
+	if oidcScopes, ok := data.GetOk("oidc_scopes"); ok {
+		role.OIDCScopes = oidcScopes.([]string)
 	}
 
-	if len(role.BoundAudiences) == 0 &&
-		len(role.BoundCIDRs) == 0 &&
-		role.BoundSubject == "" {
-		return logical.ErrorResponse("must have at least one bound constraint when creating/updating a role"), nil
+	// OIDC verifcation will enforce that the audience match the configured client_id.
+	// For other methods, require at least one bound constraint.
+	if roleType != "oidc" {
+		if len(role.BoundAudiences) == 0 &&
+			len(role.BoundCIDRs) == 0 &&
+			role.BoundSubject == "" {
+			return logical.ErrorResponse("must have at least one bound constraint when creating/updating a role"), nil
+		}
 	}
 
 	// Check that the TTL value provided is less than the MaxTTL.
@@ -338,32 +369,6 @@ func (b *jwtAuthBackend) pathRoleCreateUpdate(ctx context.Context, req *logical.
 	}
 
 	return resp, nil
-}
-
-// parseClaimWithDelimiters parses a given claim string and ensures that we can
-// separate it out into a "map path"
-func parseClaimWithDelimiters(claim, delimiters string) ([]string, error) {
-	if delimiters == "" {
-		return []string{claim}, nil
-	}
-	var ret []string
-	for _, runeVal := range delimiters {
-		idx := strings.IndexRune(claim, runeVal)
-		switch idx {
-		case -1:
-			return nil, fmt.Errorf("could not find instance of %q delimiter in claim", string(runeVal))
-		case 0:
-			return nil, fmt.Errorf("instance of %q delimiter in claim is at beginning of claim string", string(runeVal))
-		case len(claim) - 1:
-			return nil, fmt.Errorf("instance of %q delimiter in claim is at end of claim string", string(runeVal))
-		default:
-			ret = append(ret, claim[:idx])
-			claim = claim[idx+1:]
-		}
-	}
-	ret = append(ret, claim)
-
-	return ret, nil
 }
 
 // roleStorageEntry stores all the options that are set on an role

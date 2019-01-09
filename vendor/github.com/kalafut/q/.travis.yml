@@ -1,0 +1,18 @@
+language: go
+
+go:
+  - 1.x
+
+# skip the install step. don't `go get` deps. only build with code in vendor/
+install: true
+
+notifications:
+  email: false
+
+# install linter
+before_script:
+  - go get -u github.com/golangci/golangci-lint/cmd/golangci-lint
+
+script:
+  - golangci-lint --concurrency $(nproc) run
+  - go test -v -race ./...

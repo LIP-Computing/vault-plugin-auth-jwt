@@ -1,0 +1,8 @@
+[[constraint]]
+  name = "github.com/kr/pretty"
+  version = "^0.1.0"
+
+[prune]
+  go-tests = true
+  non-go = true
+  unused-packages = true
